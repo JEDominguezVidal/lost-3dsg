@@ -4,9 +4,9 @@
 # Install these with: pip3 install -r requirements.txt
 # 
 # ROS 2 dependencies should be installed via apt:
-#   sudo apt install ros-humble-rclpy ros-humble-cv-bridge \
-#     ros-humble-sensor-msgs ros-humble-visualization-msgs \
-#     ros-humble-tf2-ros ros-humble-geometry-msgs
+#   sudo apt install ros-jazzy-rclpy ros-jazzy-cv-bridge \
+#     ros-jazzy-sensor-msgs ros-jazzy-visualization-msgs \
+#     ros-jazzy-tf2-ros ros-jazzy-geometry-msgs
 # ========================================
 
 # Core Scientific Computing

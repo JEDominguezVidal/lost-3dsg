@@ -34,20 +34,20 @@
 
 ### Prerequisites
 
-- Ubuntu 22.04 (recommended)
-- ROS 2 Humble
-- Python 3.10+
+- Ubuntu 24.04 (recommended)
+- ROS 2 Jazzy
+- Python 3.12+
 - CUDA-capable GPU (recommended for optimal performance)
 
-### Step 1: Install ROS 2 Humble
+### Step 1: Install ROS 2 Jazzy
 
-If you haven't already installed ROS 2 Humble, follow the [official installation guide](https://docs.ros.org/en/humble/Installation.html).
+If you haven't already installed ROS 2 Jazzy, follow the [official installation guide](https://docs.ros.org/en/jazzy/Installation.html).
 
 ```bash
-# Quick install (Ubuntu 22.04)
+# Quick install (Ubuntu 24.04)
 sudo apt update
-sudo apt install ros-humble-desktop
-source /opt/ros/humble/setup.bash
+sudo apt install ros-jazzy-desktop
+source /opt/ros/jazzy/setup.bash
 ```
 
 ### Step 2: Install System Dependencies
@@ -56,12 +56,12 @@ Install the required ROS 2 packages:
 
 ```bash
 sudo apt install -y \
-  ros-humble-rclpy \
-  ros-humble-cv-bridge \
-  ros-humble-sensor-msgs \
-  ros-humble-visualization-msgs \
-  ros-humble-tf2-ros \
-  ros-humble-geometry-msgs \
+  ros-jazzy-rclpy \
+  ros-jazzy-cv-bridge \
+  ros-jazzy-sensor-msgs \
+  ros-jazzy-visualization-msgs \
+  ros-jazzy-tf2-ros \
+  ros-jazzy-geometry-msgs \
   python3-pip \
   python3-colcon-common-extensions
 ```
@@ -172,7 +172,7 @@ If you encounter GPU-related errors:
 If you get module import errors:
 ```bash
 # Ensure ROS 2 environment is sourced
-source /opt/ros/humble/setup.bash
+source /opt/ros/jazzy/setup.bash
 source ~/ros2_ws/install/setup.bash
 ```
 
