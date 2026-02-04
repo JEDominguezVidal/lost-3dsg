@@ -47,9 +47,12 @@ class SyncedCameraData:
 
         # Persistent subscriptions
         self.node.get_logger().info("Subscribing to camera topics...")
-        node.create_subscription(Image, '/head_front_camera/rgb/image_raw', self._rgb_callback, qos_sensor)
-        node.create_subscription(Image, '/head_front_camera/depth/image_raw', self._depth_callback, qos_sensor)
-        node.create_subscription(CameraInfo, '/head_front_camera/rgb/camera_info', self._camera_info_callback, qos_sensor)
+        # node.create_subscription(Image, '/head_front_camera/rgb/image_raw', self._rgb_callback, qos_sensor)
+        # node.create_subscription(Image, '/head_front_camera/depth/image_raw', self._depth_callback, qos_sensor)
+        # node.create_subscription(CameraInfo, '/head_front_camera/rgb/camera_info', self._camera_info_callback, qos_sensor)
+        node.create_subscription(Image, '/camera/camera/color/image_raw', self._rgb_callback, qos_sensor)
+        node.create_subscription(Image, '/camera/camera/depth/image_rect_raw', self._depth_callback, qos_sensor)
+        node.create_subscription(CameraInfo, '/camera/camera/color/camera_info', self._camera_info_callback, qos_sensor)
         self.node.get_logger().info("Subscriptions created!")
 
     def _rgb_callback(self, msg):
