@@ -95,7 +95,7 @@ class UpSampleLayer(nn.Module):
         self.align_corners = align_corners
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if (self.size is not None and tuple(x.shape[-2:]) == self.size) or self.factor == 1:
+        if (self.size is not None and (x.shape[-2], x.shape[-1]) == self.size) or self.factor == 1:
             return x
         return resize(x, self.size, self.factor, self.mode, self.align_corners)
 
@@ -397,7 +397,7 @@ class LiteMLA(nn.Module):
 
     @autocast(enabled=False)
     def relu_linear_att(self, qkv: torch.Tensor) -> torch.Tensor:
-        B, _, H, W = list(qkv.size())
+        B, _, H, W = qkv.size()
 
         if qkv.dtype == torch.float16:
             qkv = qkv.float()
@@ -544,15 +544,15 @@ class DAGBlock(nn.Module):
     ):
         super(DAGBlock, self).__init__()
 
-        self.input_keys = list(inputs.keys())
-        self.input_ops = nn.ModuleList(list(inputs.values()))
+        self.input_keys = [k for k in inputs.keys()]
+        self.input_ops = nn.ModuleList([v for v in inputs.values()])
         self.merge = merge
         self.post_input = post_input
 
         self.middle = middle
 
-        self.output_keys = list(outputs.keys())
-        self.output_ops = nn.ModuleList(list(outputs.values()))
+        self.output_keys = [k for k in outputs.keys()]
+        self.output_ops = nn.ModuleList([v for v in outputs.values()])
 
     def forward(self, feature_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         feat = [op(feature_dict[key]) for key, op in zip(self.input_keys, self.input_ops)]
