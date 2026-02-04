@@ -34,6 +34,11 @@ install(PROGRAMS
   src/perception_module/cv_utils.py
   src/perception_module/utils.py
   src/perception_module/object_manager.py
+  src/perception_module/object_info.py
+  src/perception_module/world_model.py
+  src/perception_module/models.py
+  src/perception_module/nlp_utils.py
+  src/perception_module/debug_utils.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
