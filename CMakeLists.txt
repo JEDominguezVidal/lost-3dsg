@@ -42,10 +42,11 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# Install data files (text prompts)
+# Install data files (text prompts and API key)
 install(FILES
   src/perception_module/object_identification_prompt.txt
   src/perception_module/visual_prompt.txt
+  src/perception_module/api.txt
   DESTINATION lib/${PROJECT_NAME}
 )
 
