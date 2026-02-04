@@ -28,7 +28,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   DEPENDENCIES std_msgs sensor_msgs geometry_msgs
 )
 
-# Install Python scripts
+# Install Python scripts and packages
 install(PROGRAMS
   src/perception_module/perception.py
   src/perception_module/cv_utils.py
@@ -40,6 +40,22 @@ install(PROGRAMS
   src/perception_module/nlp_utils.py
   src/perception_module/debug_utils.py
   DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install ONNX models
+#install(FILES
+#  src/perception_module/utils/l2_encoder.onnx
+#  src/perception_module/utils/l2_encoder.onnx.data
+#  src/perception_module/utils/l2_decoder.onnx
+#  src/perception_module/utils/l2_decoder.onnx.data
+#  DESTINATION lib/${PROJECT_NAME}/utils
+#)
+
+# Install efficientvit package
+install(DIRECTORY src/perception_module/efficientvit
+  DESTINATION lib/${PROJECT_NAME}
+  FILES_MATCHING PATTERN "*.py"
+  PATTERN "__pycache__" EXCLUDE
 )
 
 # Install data files (text prompts and API key)
