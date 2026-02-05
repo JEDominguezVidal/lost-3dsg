@@ -111,38 +111,87 @@ class SamDecoder:
         if img_embeddings.shape != (1, 256, 64, 64):
             raise ValueError("Got wrong embedding shape!")
 
-        if point_coords is not None:
-            point_coords = self.apply_coords(point_coords, origin_image_size, input_size).astype(np.float32)
-
+        # Handle multiple boxes by processing one at a time
+        # The ONNX model has broadcasting limitations and cannot process batched boxes
         if boxes is not None:
             boxes = self.apply_boxes(boxes, origin_image_size, input_size).astype(np.float32)
-            box_label = np.array([[2, 3] for _ in range(boxes.shape[0])], dtype=np.float32).reshape((-1, 2))
-            point_coords = boxes
-            point_labels = box_label
-
-        # Ensure correct types and batch dimension for ONNX
-        if point_coords is not None and point_coords.ndim == 2:
-            point_coords = point_coords[None, ...]
-        if point_labels is not None and point_labels.ndim == 1:
-            point_labels = point_labels[None, ...]
+            num_boxes = boxes.shape[0]
             
-        # VERY IMPORTANT: point_labels should be int64 for many ONNX SAM implementations, 
-        # especially on CPU where automatic casting might fail in some nodes (like Where).
-        if point_labels is not None:
-            point_labels = point_labels.astype(np.float32) 
+            if num_boxes > 1:
+                # Process each box individually to avoid ONNX broadcasting errors
+                all_masks = []
+                all_iou_predictions = []
+                all_low_res_masks = []
+                
+                for i in range(num_boxes):
+                    single_box = boxes[i:i+1]  # Shape: (1, 2, 2)
+                    single_label = np.array([[2, 3]], dtype=np.int64)  # Shape: (1, 2)
+                    
+                    input_dict = {
+                        "image_embeddings": img_embeddings,
+                        "point_coords": single_box,
+                        "point_labels": single_label
+                    }
+                    
+                    try:
+                        low_res_mask, iou_pred = self.session.run(None, input_dict)
+                        all_low_res_masks.append(low_res_mask)
+                        all_iou_predictions.append(iou_pred)
+                    except Exception as e:
+                        print(f"ONNX Runtime error in SamDecoder.run for box {i}!")
+                        print(f"Input info:")
+                        for k, v in input_dict.items():
+                            if v is not None:
+                                print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+                        raise e
+                
+                # Concatenate results from all boxes
+                low_res_masks = np.concatenate(all_low_res_masks, axis=0)
+                iou_predictions = np.concatenate(all_iou_predictions, axis=0)
+            else:
+                # Single box case
+                box_label = np.array([[2, 3]], dtype=np.int64)
+                input_dict = {
+                    "image_embeddings": img_embeddings,
+                    "point_coords": boxes,
+                    "point_labels": box_label
+                }
+                
+                try:
+                    low_res_masks, iou_predictions = self.session.run(None, input_dict)
+                except Exception as e:
+                    print(f"ONNX Runtime error in SamDecoder.run!")
+                    print(f"Input info:")
+                    for k, v in input_dict.items():
+                        if v is not None:
+                            print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+                    raise e
+        else:
+            # Point-based prompts
+            if point_coords is not None:
+                point_coords = self.apply_coords(point_coords, origin_image_size, input_size).astype(np.float32)
 
-        input_dict = {"image_embeddings": img_embeddings, "point_coords": point_coords, "point_labels": point_labels}
-        
-        try:
-            # print(f"DEBUG: session.run input shapes: {[ (k, v.shape, v.dtype) for k, v in input_dict.items() if v is not None]}")
-            low_res_masks, iou_predictions = self.session.run(None, input_dict)
-        except Exception as e:
-            print(f"ONNX Runtime error in SamDecoder.run!")
-            print(f"Input info:")
-            for k, v in input_dict.items():
-                if v is not None:
-                    print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
-            raise e
+            # Ensure correct types and batch dimension for ONNX
+            if point_coords is not None and point_coords.ndim == 2:
+                point_coords = point_coords[None, ...]
+            if point_labels is not None and point_labels.ndim == 1:
+                point_labels = point_labels[None, ...]
+                
+            # VERY IMPORTANT: point_labels should be int64 for many ONNX SAM implementations.
+            if point_labels is not None:
+                point_labels = point_labels.astype(np.int64) 
+
+            input_dict = {"image_embeddings": img_embeddings, "point_coords": point_coords, "point_labels": point_labels}
+            
+            try:
+                low_res_masks, iou_predictions = self.session.run(None, input_dict)
+            except Exception as e:
+                print(f"ONNX Runtime error in SamDecoder.run!")
+                print(f"Input info:")
+                for k, v in input_dict.items():
+                    if v is not None:
+                        print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+                raise e
 
         masks = mask_postprocessing(low_res_masks, origin_image_size)
 

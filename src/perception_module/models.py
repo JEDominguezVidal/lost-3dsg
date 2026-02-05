@@ -153,7 +153,7 @@ class VitSam():
     def __init__(self, encoder_model, decoder_model):
         # Select device and pass it to the ONNX-based encoder/decoder so they
         # use the CUDAExecutionProvider when available.
-        self.device = "cpu" if torch.cuda.is_available() else "cpu"
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
         print("VitSam device:", self.device)
 
         self.decoder = SamDecoder(decoder_model, device=self.device)

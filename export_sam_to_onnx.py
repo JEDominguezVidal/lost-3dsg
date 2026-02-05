@@ -76,18 +76,17 @@ def export_decoder(model: EfficientViTSam, output_path: str, opset: int = 17) ->
                 image_pe=self.prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embeddings,
                 dense_prompt_embeddings=dense_embeddings,
-                multimask_output=True, # Keep True to match original architecture internal logic
+                multimask_output=False,
             )
             
-            # SLICE to single mask to avoid broadcasting issues in the final ONNX graph
-            return low_res_masks[:, 0:1, :, :], iou_predictions[:, 0:1]
+            return low_res_masks, iou_predictions
             
     onnx_model = DecoderOnnxModel(model=model)
     
     # Dummy inputs
     dummy_image_embeddings = torch.randn(1, 256, 64, 64)
     dummy_point_coords = torch.randn(1, 2, 2)
-    dummy_point_labels = torch.randn(1, 2)
+    dummy_point_labels = torch.randint(low=0, high=4, size=(1, 2), dtype=torch.int64)
     
     output_names = ["low_res_masks", "iou_predictions"]
     
@@ -109,8 +108,8 @@ def export_decoder(model: EfficientViTSam, output_path: str, opset: int = 17) ->
             output_names=output_names,
             dynamic_axes={
                 "image_embeddings": {0: "batch_size"},
-                "point_coords": {0: "batch_size"},
-                "point_labels": {0: "batch_size"},
+                "point_coords": {0: "batch_size", 1: "num_points"},
+                "point_labels": {0: "batch_size", 1: "num_points"},
                 "low_res_masks": {0: "batch_size"},
                 "iou_predictions": {0: "batch_size"},
             },

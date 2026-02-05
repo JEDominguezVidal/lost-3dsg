@@ -391,7 +391,7 @@ class DetectObjects(Node):
         detections = []
         for bbox, label_name, score in zip(bboxs, labels, scores):
 
-            masks, _ = self.vitsam(camera_data['rgb'].copy(), bbox)
+            masks, _ = self.vitsam(camera_data['rgb'].copy(), [bbox])
             for mask in masks:
                 mask_np = mask.cpu().numpy() if hasattr(mask, 'cpu') else np.array(mask)
                 mask_np = mask_np.transpose(1, 2, 0)
