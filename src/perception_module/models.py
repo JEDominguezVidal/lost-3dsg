@@ -126,7 +126,7 @@ class DINO():
         results = self.processor.post_process_grounded_object_detection(
             outputs,
             input_ids=inputs["input_ids"],
-            box_threshold=box_threshold,
+            threshold=box_threshold,
             text_threshold=text_threshold,
             target_sizes=[image_rgb.size[::-1]] 
         )[0]
