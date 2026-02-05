@@ -43,13 +43,13 @@ install(PROGRAMS
 )
 
 # Install ONNX models
-#install(FILES
-#  src/perception_module/utils/l2_encoder.onnx
-#  src/perception_module/utils/l2_encoder.onnx.data
-#  src/perception_module/utils/l2_decoder.onnx
-#  src/perception_module/utils/l2_decoder.onnx.data
-#  DESTINATION lib/${PROJECT_NAME}/utils
-#)
+install(FILES
+  src/perception_module/utils/l2_encoder.onnx
+  src/perception_module/utils/l2_encoder.onnx.data
+  src/perception_module/utils/l2_decoder.onnx
+  src/perception_module/utils/l2_decoder.onnx.data
+  DESTINATION lib/${PROJECT_NAME}/utils
+)
 
 # Install efficientvit package
 install(DIRECTORY src/perception_module/efficientvit

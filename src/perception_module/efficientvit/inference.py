@@ -79,6 +79,8 @@ class SamDecoder:
         print(f"loading decoder model from {model_path}...")
         self.target_size = target_size
         self.mask_threshold = mask_threshold
+        # Disable optimizations to avoid broadcasting bugs on CPU
+        opt.graph_optimization_level = ort.GraphOptimizationLevel.ORT_DISABLE_ALL
         self.session = ort.InferenceSession(model_path, opt, providers=provider, **kwargs)
 
     @staticmethod
@@ -118,8 +120,29 @@ class SamDecoder:
             point_coords = boxes
             point_labels = box_label
 
+        # Ensure correct types and batch dimension for ONNX
+        if point_coords is not None and point_coords.ndim == 2:
+            point_coords = point_coords[None, ...]
+        if point_labels is not None and point_labels.ndim == 1:
+            point_labels = point_labels[None, ...]
+            
+        # VERY IMPORTANT: point_labels should be int64 for many ONNX SAM implementations, 
+        # especially on CPU where automatic casting might fail in some nodes (like Where).
+        if point_labels is not None:
+            point_labels = point_labels.astype(np.float32) 
+
         input_dict = {"image_embeddings": img_embeddings, "point_coords": point_coords, "point_labels": point_labels}
-        low_res_masks, iou_predictions = self.session.run(None, input_dict)
+        
+        try:
+            # print(f"DEBUG: session.run input shapes: {[ (k, v.shape, v.dtype) for k, v in input_dict.items() if v is not None]}")
+            low_res_masks, iou_predictions = self.session.run(None, input_dict)
+        except Exception as e:
+            print(f"ONNX Runtime error in SamDecoder.run!")
+            print(f"Input info:")
+            for k, v in input_dict.items():
+                if v is not None:
+                    print(f"  {k}: shape={v.shape}, dtype={v.dtype}")
+            raise e
 
         masks = mask_postprocessing(low_res_masks, origin_image_size)
 

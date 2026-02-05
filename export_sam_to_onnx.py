@@ -76,10 +76,11 @@ def export_decoder(model: EfficientViTSam, output_path: str, opset: int = 17) ->
                 image_pe=self.prompt_encoder.get_dense_pe(),
                 sparse_prompt_embeddings=sparse_embeddings,
                 dense_prompt_embeddings=dense_embeddings,
-                multimask_output=True,
+                multimask_output=True, # Keep True to match original architecture internal logic
             )
             
-            return low_res_masks, iou_predictions
+            # SLICE to single mask to avoid broadcasting issues in the final ONNX graph
+            return low_res_masks[:, 0:1, :, :], iou_predictions[:, 0:1]
             
     onnx_model = DecoderOnnxModel(model=model)
     
@@ -102,11 +103,12 @@ def export_decoder(model: EfficientViTSam, output_path: str, opset: int = 17) ->
             output_path,
             export_params=True,
             verbose=False,
-            opset_version=opset,
+            opset_version=17,
             do_constant_folding=True,
             input_names=["image_embeddings", "point_coords", "point_labels"],
             output_names=output_names,
             dynamic_axes={
+                "image_embeddings": {0: "batch_size"},
                 "point_coords": {0: "batch_size"},
                 "point_labels": {0: "batch_size"},
                 "low_res_masks": {0: "batch_size"},

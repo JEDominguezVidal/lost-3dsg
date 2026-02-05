@@ -1118,7 +1118,7 @@ def publish_uncertain_bboxes(node, uncertain_objects, uncertain_bbox_pub):
 
 def vlm_call(prompt, encoded_image):
     agent = client.chat.completions.create(
-        model="gpt-5-mini-2025-08-07",
+        model="gpt-5-nano-2025-08-07",
         messages=[
             {
                 "role": "user",
