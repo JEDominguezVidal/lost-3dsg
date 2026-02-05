@@ -37,7 +37,7 @@ file_path = os.path.abspath(__file__)
 current_dir = os.path.dirname(file_path)
 PROJECT_ROOT = current_dir.split('/install/')[0] if '/install/' in current_dir else os.path.abspath(os.path.join(current_dir, "../.."))
 
-with open(os.path.join(PROJECT_ROOT, "src", "perception_module", "api.txt"), "r") as f:
+with open(os.path.join(current_dir, "api.txt"), "r") as f:
     api_key = f.read().strip()
 
 client = OpenAI(api_key=api_key)
