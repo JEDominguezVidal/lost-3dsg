@@ -156,6 +156,21 @@ def mask_list_to_pointcloud2(masks, depth_image, camera_info, node, labels=None,
         if len(xs) == 0:
             node.get_logger().warn(f"  Empty mask : {obj_idx}, skip")
             continue
+
+        # Get mask and depth image dimensions
+        mask_h, mask_w = mask2d.shape[:2]
+        depth_h, depth_w = depth_image.shape[:2]
+        
+        # Scale coordinates if mask and depth have different resolutions
+        if mask_w != depth_w or mask_h != depth_h:
+            scale_x = depth_w / mask_w
+            scale_y = depth_h / mask_h
+            xs = (xs * scale_x).astype(int)
+            ys = (ys * scale_y).astype(int)
+            # Clip to valid bounds
+            xs = np.clip(xs, 0, depth_w - 1)
+            ys = np.clip(ys, 0, depth_h - 1)
+
         if len(xs) > max_points_per_obj:
             idx = np.linspace(0, len(xs) - 1, max_points_per_obj).astype(int)
             xs = xs[idx]
@@ -657,6 +672,20 @@ def mask_list_to_centroid_and_bbox(mask_list, labels, depth_image, camera_info, 
             centroids_3d.append(None)
             bboxes_3d.append(None)
             continue
+
+        # Get mask and depth image dimensions
+        mask_h, mask_w = mask.shape[:2]
+        depth_h, depth_w = depth_image.shape[:2]
+        
+        # Scale coordinates if mask and depth have different resolutions
+        if mask_w != depth_w or mask_h != depth_h:
+            scale_x = depth_w / mask_w
+            scale_y = depth_h / mask_h
+            xs = (xs * scale_x).astype(int)
+            ys = (ys * scale_y).astype(int)
+            # Clip to valid bounds
+            xs = np.clip(xs, 0, depth_w - 1)
+            ys = np.clip(ys, 0, depth_h - 1)
 
         # Log start of mask processing
         node.file_logger.info(f"Mask {mask_idx}: start processing, total pixels={len(xs)}")
