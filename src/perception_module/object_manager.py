@@ -654,6 +654,11 @@ class ObjectManagerNode(Node):
 
         in_exploration = self.exploration_mode
         mode_str = "EXPLORATION" if in_exploration else f"TRACKING STEP {self.tracking_step_counter}"
+        
+        iteration_start_time = time.time()
+        timing_results = {}
+        self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] {mode_str} Cycle started.")
+
         print(f"Mode: {mode_str}")
 
         # IMPORTANT: Do NOT return if msg.descriptions is empty!
@@ -672,8 +677,13 @@ class ObjectManagerNode(Node):
             material = description.material
             description_text = description.description
 
+            # --- Stage: Embeddings ---
+            embed_start = time.time()
+            self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting Embeddings stage for {label}...")
             print(f"1. Calculating embedding for description...")
             description_embedding = get_embedding(client, description_text)
+            timing_results['Embeddings'] = timing_results.get('Embeddings', 0) + (time.time() - embed_start)
+            self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed Embeddings stage for {label}.")
 
 
             # Find the old key with only label
@@ -707,6 +717,8 @@ class ObjectManagerNode(Node):
             already_seen = False
 
             # ======== EXPLORATION LOGIC ========
+            matching_start = time.time()
+            self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting Matching stage for {label}...")
             if in_exploration:
                 print(f"3. [EXPLORATION] Comparing with {len(wm.persistent_perceptions)} persistent objects using lost_similarity...")
                 for obj in wm.persistent_perceptions:
@@ -898,9 +910,14 @@ class ObjectManagerNode(Node):
                     self.exploration_step_counter += 1
                     save_scene_graph(self, self.exploration_step_counter, is_exploration=True)
 
+            timing_results['Matching'] = timing_results.get('Matching', 0) + (time.time() - matching_start)
+            self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed Matching stage for {label}.")
+
         # ======== MANAGEMENT OF OBJECTS NOT SEEN IN THE CURRENT FRAME ========
         # DELETION - Using FOV volume from depth camera (full visible area)
-
+        
+        pov_start = time.time()
+        self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting POV Analysis stage...")
         if not in_exploration:
 
             description_recieved = len(msg.descriptions) > 0
@@ -991,7 +1008,13 @@ class ObjectManagerNode(Node):
                     print(f"No uncertain object to remove in this step")
                 else:
                     print(f"No uncertain object present")
+        
+        timing_results['POV Analysis'] = time.time() - pov_start
+        self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed POV Analysis stage.")
 
+        # --- Stage: State Update & IO ---
+        io_start = time.time()
+        self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting State Update & IO stage...")
         if objects_modified and not in_exploration:
             publish_persistent_bboxes(self, wm, self.persistent_bbox_pub)
             publish_persistent_centroids(self, wm, self.persistent_centroids_pub)
@@ -999,14 +1022,28 @@ class ObjectManagerNode(Node):
             publish_uncertain_centroids(self, self.uncertain_objects, self.uncertain_centroids_pub)
             save_uncertain_objects(self)
 
-        # Save scene graph for this tracking step
         if not in_exploration:
             tracking_logger.log_tracking_step_start(self.tracking_step_counter)
             save_scene_graph(self, self.tracking_step_counter)
+        
+        timing_results['State Update & IO'] = time.time() - io_start
+        self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed State Update & IO stage.")
 
         # Prevent reusing stale data if no new bbox message arrives
         self.latest_bboxes.clear()
         self.latest_fov_volume = None
+
+        # --- Iteration Summary ---
+        total_time = time.time() - iteration_start_time
+        self.log_both("info", "\n" + "="*50)
+        self.log_both("info", f"PERFORMANCE SUMMARY - Object Manager Cycle ({mode_str})")
+        self.log_both("info", "="*50)
+        for stage, duration in timing_results.items():
+            percentage = (duration / total_time) * 100
+            self.log_both("info", f"{stage:20}: {duration:6.3f}s ({percentage:5.1f}%)")
+        self.log_both("info", "-"*50)
+        self.log_both("info", f"{'Total Iteration':20}: {total_time:6.3f}s (100.0%)")
+        self.log_both("info", "="*50 + "\n")
 
 
 

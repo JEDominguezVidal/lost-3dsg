@@ -20,14 +20,14 @@ from cv_bridge import CvBridge
 import numpy as np
 import cv2
 from cv_utils import _clear_markers
-import time
 from dataclasses import dataclass
 from typing import Tuple
 from collections import Counter
 from matplotlib.colors import to_rgb
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import logging
 from datetime import datetime
+import time
+import logging
 
 # Project imports
 from cv_utils import *
@@ -350,15 +350,21 @@ class DetectObjects(Node):
         
         return
     
-    def run_detection(self, camera_data):
+    def run_detection(self, camera_data, timing_results=None):
         self.get_logger().debug("Running detection...")
         
+        # --- Stage: VLM Identification ---
+        vlm_id_start = time.time()
         self.log_both("info", "=== START DETECTION ===")
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting VLM Identification stage...")
         self.log_both("info", "Calling VLM for object identification...")
         objects_to_identify = vlm_call(
             open(os.path.join(os.path.dirname(file_path), "object_identification_prompt.txt"), "r").read(),
             numpy_to_base64(camera_data['rgb'])
         )
+        if timing_results is not None:
+            timing_results['VLM Identification'] = time.time() - vlm_id_start
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed VLM Identification stage.")
 
         labels = []
         for label in objects_to_identify.split(','):
@@ -368,9 +374,11 @@ class DetectObjects(Node):
 
         self.detector.set_classes(labels)
 
+        # --- Stage: OWLv2 Detection ---
+        owl_start = time.time()
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting OWLv2 Detection stage...")
         #inference 
         bboxs, labels, scores = self.detector.predict(camera_data['rgb'], box_threshold=0.32, text_threshold=0.25)
-        
         
         self.log_both("info", f"OWLv2 detected {len(labels)} objects with labels: {labels}")
 
@@ -379,6 +387,10 @@ class DetectObjects(Node):
             bboxs, labels, scores = apply_nms(bboxs, labels, scores, iou_threshold=0.5)
             self.log_both("info", f"After NMS: {len(labels)} objects remaining with labels: {labels}")
 
+        if timing_results is not None:
+            timing_results['OWLv2 Detection'] = time.time() - owl_start
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed OWLv2 Detection stage.")
+
         # Check movement after predict
         if not self.is_stationary:
             # ROS2_MIGRATION
@@ -386,6 +398,9 @@ class DetectObjects(Node):
             self.processing_interrupted = True
             return []
 
+        # --- Stage: SAM Masking ---
+        sam_start = time.time()
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting SAM Masking stage...")
         #Obtain masks for each bbox
         
         detections = []
@@ -403,10 +418,21 @@ class DetectObjects(Node):
                 )
                 detections.append(detection)
 
+        if timing_results is not None:
+            timing_results['SAM Masking'] = time.time() - sam_start
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed SAM Masking stage.")
+
+        # --- Stage: PCL Generation ---
+        pcl_start = time.time()
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting PCL Generation stage...")
         # Reset point cloud ID counter for each new perception to avoid color overlapping
         self.pcl_object_id_counter = 0
 
         self.color_pcl(detections, camera_data)
+
+        if timing_results is not None:
+            timing_results['PCL Generation'] = time.time() - pcl_start
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed PCL Generation stage.")
 
         self.log_both("info", f"Finished detection with {len(detections)} final detections.")
 
@@ -456,19 +482,27 @@ class DetectObjects(Node):
 
     def publish_objects(self):
         self.processing_interrupted = False
+        iteration_start_time = time.time()
+        timing_results = {}
         self.log_both("info", "=== New perception cycle started ===")
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Iteration start.")
 
         if not self.is_stationary:
             # ROS2_MIGRATION
             self.get_logger().warn("Robot moving at the start, canceling processing")
             return
 
-        # --- 1. Get synced data ---
+        # --- Stage 1: Get synced data ---
+        sync_start = time.time()
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting Sync Data stage...")
         camera_data = self.camera_data.get_synced_data()
 
         if camera_data is None:
             self.get_logger().warn("Could not get synced camera data, waiting ...")
             return
+        
+        timing_results['Sync Data'] = time.time() - sync_start
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed Sync Data stage.")
 
         image_raw = camera_data['rgb']
         depth = camera_data['depth']
@@ -482,8 +516,8 @@ class DetectObjects(Node):
         image_crop_source = image_raw.copy()
         image_for_bb = image_raw.copy()
 
-        # --- 2. Run detection (call object detector and publish point cloud for detected objects) ---
-        detections = self.run_detection(camera_data)
+        # --- Stage 2: Run detection ---
+        detections = self.run_detection(camera_data, timing_results=timing_results)
 
         if self.processing_interrupted or not self.is_stationary:
             self.get_logger().error("Processing interrupted: robot moving during detection")
@@ -624,12 +658,20 @@ class DetectObjects(Node):
             msg.fov_z_min = fov_volume["z_min"]
             msg.fov_z_max = fov_volume["z_max"]
 
+        # --- Stage 3: 3D Geometry ---
+        geometry_start = time.time()
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting 3D Geometry stage...")
         # --- 4. Calculate 3D centroids and bboxes for ALL detections together ---
         all_masks = [det.mask[:, :, 0] for det in detections]
         centroids_3d, bboxes_3d = mask_list_to_centroid_and_bbox(
             all_masks, labels1, depth, camera_info, node=self, bbox_marker_pub=self.bbox_marker_pub, centroid_marker_pub=self.centroid_marker_pub
         )
+        timing_results['3D Geometry'] = time.time() - geometry_start
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed 3D Geometry stage.")
 
+        # --- Stage 4: Crop Prep ---
+        crop_start = time.time()
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting Crop Prep stage...")
         # --- Create output directories for cropped images ---
         output_dir = os.path.expanduser(os.path.join(os.path.dirname(file_path), "../../output"))
         os.makedirs(output_dir, exist_ok=True)
@@ -687,6 +729,12 @@ class DetectObjects(Node):
             except Exception as e:
                 self.get_logger().error(f"Error in crop conversion: {e}")
 
+        timing_results['Crop Prep'] = time.time() - crop_start
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed Crop Prep stage.")
+
+        # --- Stage 5: VLM Description ---
+        vlm_desc_start = time.time()
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting VLM Description stage (Parallel)...")
         # --- 6. Call VLM for each cropped object in parallel ---
         with ThreadPoolExecutor(max_workers=min(4, len(crops_data))) as executor:
             # Submit all tasks
@@ -703,6 +751,12 @@ class DetectObjects(Node):
                             vlm_results[i] = result
                             self.get_logger().info(f"Completed VLM call for {result['label']}")
                             break
+        timing_results['VLM Description'] = time.time() - vlm_desc_start
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed VLM Description stage.")
+
+        # --- Stage 6: Output & Logging ---
+        output_start = time.time()
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting Output & Logging stage...")
 
         # --- Save JSON and prepare descriptions for DEBUG ---
         
@@ -791,6 +845,21 @@ class DetectObjects(Node):
 
         with open(perceptions_output_path, "w") as f:
             json.dump(new_perceptions, f, indent=4)
+
+        timing_results['Output & Logging'] = time.time() - output_start
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed Output & Logging stage.")
+
+        # --- Iteration Summary ---
+        total_time = time.time() - iteration_start_time
+        self.log_both("info", "\n" + "="*50)
+        self.log_both("info", f"PERFORMANCE SUMMARY - Perception Cycle")
+        self.log_both("info", "="*50)
+        for stage, duration in timing_results.items():
+            percentage = (duration / total_time) * 100
+            self.log_both("info", f"{stage:20}: {duration:6.3f}s ({percentage:5.1f}%)")
+        self.log_both("info", "-"*50)
+        self.log_both("info", f"{'Total Iteration':20}: {total_time:6.3f}s (100.0%)")
+        self.log_both("info", "="*50 + "\n")
 
         # Wait for user input to start next perception cycle or automatic after movement
         self.waiting_for_input = False
