@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 
 import torch
 import numpy as np
@@ -8,13 +8,9 @@ import torchvision.transforms as transforms
 from efficientvit.export_encoder import SamResize
 from efficientvit.inference import SamDecoder, SamEncoder
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-import cv2
-from PIL import Image
-import torch
-import cv2
-import numpy as np
 from PIL import Image
 from transformers import Owlv2Processor, Owlv2ForObjectDetection
+
 
 class OWLv2():
     def __init__(self, model_id="google/owlv2-base-patch16-ensemble"):
@@ -108,7 +104,7 @@ class DINO():
 
     def predict(self, image, box_threshold=0.4, text_threshold=0.3):
         if self.classes is None:
-            raise ValueError("Chiama set_classes prima di predict().")
+            raise ValueError("Call set_classes before predict().")
 
         if isinstance(image, np.ndarray):
             image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -148,44 +144,93 @@ class DINO():
                 cv2.putText(image, f"{classes[i]} {confidences[i]:.2f}", (x1, max(0, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2) 
         return image
 
+
 class VitSam():
+    """
+    EfficientViT SAM wrapper using native PyTorch inference.
+    
+    Note: ONNX export had issues producing NaN outputs, so this class
+    uses PyTorch directly via EfficientViTSamPredictor for reliable inference.
+    """
 
-    def __init__(self, encoder_model, decoder_model):
-        # Select device and pass it to the ONNX-based encoder/decoder so they
-        # use the CUDAExecutionProvider when available.
+    def __init__(self, encoder_model=None, decoder_model=None):
+        # Select device
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        print("VitSam device:", self.device)
-
-        self.decoder = SamDecoder(decoder_model, device=self.device)
-        self.encoder = SamEncoder(encoder_model, device=self.device)
-
+        print(f"VitSam device: {self.device} (PyTorch mode)")
+        
+        # Load the full EfficientViT SAM model using PyTorch
+        import sys
+        import os
+        # Add path for efficientvit imports
+        module_path = os.path.dirname(os.path.abspath(__file__))
+        if module_path not in sys.path:
+            sys.path.insert(0, module_path)
+        
+        from efficientvit.sam_model_zoo import create_sam_model
+        from efficientvit.models.efficientvit.sam import EfficientViTSamPredictor
+        
+        # Compute absolute path to checkpoint (project root / assets / checkpoints / sam / l2.pt)
+        # module_path = src/perception_module/, go up 2 levels to reach project root (lost-3dsg/)
+        project_root = os.path.dirname(os.path.dirname(module_path))
+        weight_path = os.path.join(project_root, "assets", "checkpoints", "sam", "l2.pt")
+        
+        print(f"Loading EfficientViT SAM l2 model from {weight_path}...")
+        sam_model = create_sam_model("l2", pretrained=True, weight_url=weight_path).eval()
+        sam_model = sam_model.to(self.device)
+        
+        # Create the predictor wrapper
+        self.predictor = EfficientViTSamPredictor(sam_model)
+        print("Model loaded successfully!")
+        
+        # Image size for l2 model
+        self.img_size = 512
+        self.target_size = 512
 
     def __call__(self, img, bboxes):
+        """
+        Generate masks for given bounding boxes.
+        
+        Args:
+            img: BGR image (numpy array)
+            bboxes: List of [x1, y1, x2, y2] bounding boxes
+            
+        Returns:
+            masks: Tensor of shape [N, 1, H, W] with boolean masks
+            boxes: Input boxes as numpy array
+        """
+        # Convert to RGB for the predictor
         raw_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         origin_image_size = raw_img.shape[:2]
-        img = self._preprocess(raw_img, img_size=512)
-        img_embeddings = self.encoder(img)
+        
+        # Set image (computes embeddings)
+        self.predictor.set_image(raw_img)
+        
         boxes = np.array(bboxes, dtype=np.float32)
-        masks, _, _ = self.decoder.run(
-            img_embeddings=img_embeddings,
-            origin_image_size=origin_image_size,
-            boxes=boxes,
-        )
-
+        
+        # Generate masks for each box
+        all_masks = []
+        for box in boxes:
+            # Predict mask for this box
+            masks_np, iou_pred, low_res_masks = self.predictor.predict(
+                box=box,
+                multimask_output=False,
+            )
+            
+            # Convert to torch tensor with shape [1, H, W] -> [1, 1, H, W]
+            mask_tensor = torch.from_numpy(masks_np).to(self.device)
+            if mask_tensor.dim() == 2:
+                mask_tensor = mask_tensor.unsqueeze(0)  # Add channel dim
+            mask_tensor = mask_tensor.unsqueeze(0)  # Add batch dim [1, 1, H, W]
+            all_masks.append(mask_tensor)
+        
+        # Reset predictor for next call
+        self.predictor.reset_image()
+        
+        # Stack all masks
+        if all_masks:
+            masks = torch.cat(all_masks, dim=0)  # [N, 1, H, W]
+        else:
+            masks = torch.zeros((0, 1, origin_image_size[0], origin_image_size[1]), 
+                               dtype=torch.bool, device=self.device)
+        
         return masks, boxes
-
-    def _preprocess(self, x, img_size=512):
-        pixel_mean = [123.675 / 255, 116.28 / 255, 103.53 / 255]
-        pixel_std = [58.395 / 255, 57.12 / 255, 57.375 / 255]
-
-        x = torch.tensor(x)
-        resize_transform = SamResize(img_size)
-        x = resize_transform(x).float() / 255
-        x = transforms.Normalize(mean=pixel_mean, std=pixel_std)(x)
-
-        h, w = x.shape[-2:]
-        th, tw = img_size, img_size
-        assert th >= h and tw >= w
-        x = F.pad(x, (0, tw - w, 0, th - h), value=0).unsqueeze(0).numpy()
-
-        return x

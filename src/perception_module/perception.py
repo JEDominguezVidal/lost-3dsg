@@ -789,7 +789,7 @@ class DetectObjects(Node):
             for obj in wm.actual_perceptions
         ]
 
-        with open(perceptions_output_path, "a") as f:
+        with open(perceptions_output_path, "w") as f:
             json.dump(new_perceptions, f, indent=4)
 
         # Wait for user input to start next perception cycle or automatic after movement

@@ -15,6 +15,7 @@ bridge = CvBridge()
 file_path = os.path.abspath(__file__)
 ENCODER_VITSAM_PATH = os.path.join(os.path.dirname(file_path),"utils", "l2_encoder.onnx")
 DECODER_VITSAM_PATH = os.path.join(os.path.dirname(file_path),"utils", "l2_decoder.onnx")
+OWLV2_MODEL_ID = "google/owlv2-base-patch16-ensemble"
 
 
 class SyncedCameraData:
