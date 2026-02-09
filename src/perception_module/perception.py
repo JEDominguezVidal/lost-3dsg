@@ -34,6 +34,7 @@ from cv_utils import *
 import utils
 from utils import draw_detections, apply_nms, compute_iou_3d
 from models import DINO, VitSam, OWLv2
+from florence2_detector import get_florence_detector
 from lost3dsg.msg import Centroid, CentroidArray, Bbox3d, Bbox3dArray
 from object_info import Object
 from world_model import wm
@@ -262,8 +263,11 @@ class DetectObjects(Node):
 
         self.pub_image = self.create_publisher(Image, "/image_with_bb", qos_latch)
         self.COLORS = ['red', 'green', 'blue', 'magenta', 'gray', 'yellow'] * 3
-        self.detector = DINO()
+        self.detector = DINO()  # Keep for backwards compatibility (may be removed later)
         self.vitsam = VitSam(utils.ENCODER_VITSAM_PATH, utils.DECODER_VITSAM_PATH)
+        
+        # Florence-2 detector for object detection and captioning
+        self.florence = get_florence_detector(device="cuda")
 
         self.centroid_pub = self.create_publisher(CentroidArray, "/centroids_custom", qos_latch)
 
@@ -429,48 +433,33 @@ class DetectObjects(Node):
     def run_detection(self, camera_data, timing_results=None):
         self.get_logger().debug("Running detection...")
         
-        # --- Stage: VLM Identification ---
-        vlm_id_start = time.time()
+        # --- Stage: Florence-2 Detection (replaces VLM Identification + OWLv2) ---
+        florence_start = time.time()
         self.log_both("info", "=== START DETECTION ===")
-        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting VLM Identification stage...")
-        self.log_both("info", "Calling VLM for object identification...")
-        objects_to_identify = vlm_call(
-            open(os.path.join(os.path.dirname(file_path), "object_identification_prompt.txt"), "r").read(),
-            numpy_to_base64(camera_data['rgb'])
-        )
-        if timing_results is not None:
-            timing_results['VLM Identification'] = time.time() - vlm_id_start
-        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed VLM Identification stage.")
-
-        labels = []
-        for label in objects_to_identify.split(','):
-            labels.append(label.strip())
-
-        self.log_both("info", f"Parsed labels ({len(labels)} objects): {labels}")
-
-        self.detector.set_classes(labels)
-
-        # --- Stage: OWLv2 Detection ---
-        owl_start = time.time()
-        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting OWLv2 Detection stage...")
-        #inference 
-        bboxs, labels, scores = self.detector.predict(camera_data['rgb'], box_threshold=0.32, text_threshold=0.25)
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting Florence-2 Detection stage...")
         
-        self.log_both("info", f"OWLv2 detected {len(labels)} objects with labels: {labels}")
-
+        # Florence-2 detects objects and provides bounding boxes
+        florence_detections = self.florence.detect_objects(camera_data['rgb'])
+        
+        # Extract labels, bboxes, scores from Florence-2 output
+        labels = [det['label'] for det in florence_detections]
+        bboxs = [det['bbox'] for det in florence_detections]  # [x1, y1, x2, y2]
+        scores = [det['score'] for det in florence_detections]
+        
+        self.log_both("info", f"Florence-2 detected {len(labels)} objects with labels: {labels}")
+        
         # Apply NMS to remove overlapping bounding boxes
         if len(bboxs) > 0:
             bboxs, labels, scores = apply_nms(bboxs, labels, scores, iou_threshold=0.5)
             self.log_both("info", f"After NMS: {len(labels)} objects remaining with labels: {labels}")
-
+        
         if timing_results is not None:
-            timing_results['OWLv2 Detection'] = time.time() - owl_start
-        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed OWLv2 Detection stage.")
-
-        # Check movement after predict
+            timing_results['Florence-2 Detection'] = time.time() - florence_start
+        self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed Florence-2 Detection stage.")
+        
+        # Check movement after detection
         if not self.is_stationary:
-            # ROS2_MIGRATION
-            self.log_both("warn", "Robot moving after OWLv2 predict, interrupting")
+            self.log_both("warn", "Robot moving after detection, interrupting")
             self.processing_interrupted = True
             return []
 
@@ -521,31 +510,21 @@ class DetectObjects(Node):
             
         label = crop_info['label']
         cropped = crop_info['cropped']
-        # Load prompt from file
-        prompt_file_path = os.path.join(os.path.dirname(file_path), "visual_prompt.txt")
-        with open(prompt_file_path, "r") as f:
-            visual_prompt_template = f.read().strip()
-        
-        visual_prompt = visual_prompt_template.replace("{LABEL}", label)
-        encoded_image = numpy_to_base64(cropped)
         
         try:
-            json_answer = vlm_call(visual_prompt, encoded_image)
-            
-            # Parsing JSON
-            json_data = json.loads(json_answer)
-            obj_data = json_data.get("objects", [{}])[0]
+            # Use Florence-2 for description (replaces GPT vlm_call)
+            description = self.florence.describe_image(cropped)
             
             return {
                 "label": label,
-                "json_answer": json_answer,
-                "description": obj_data.get("description", "unknown"),
-                "color": obj_data.get("color", "unknown"),
-                "material": obj_data.get("material", "unknown"),
-                "shape": obj_data.get("shape", "unknown")
+                "json_answer": "{}",  # No JSON from Florence-2
+                "description": description if description else "unknown",
+                "color": "unknown",  # Florence-2 doesn't extract structured fields
+                "material": "unknown",
+                "shape": "unknown"
             }
         except Exception as e:
-            self.get_logger().error(f"VLM error for {label}: {e}")
+            self.get_logger().error(f"Florence-2 description error for {label}: {e}")
             return {
                 "label": label,
                 "json_answer": "{}",
