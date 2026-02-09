@@ -32,7 +32,7 @@ import logging
 # Project imports
 from cv_utils import *
 import utils
-from utils import draw_detections, apply_nms
+from utils import draw_detections, apply_nms, compute_iou_3d
 from models import DINO, VitSam, OWLv2
 from lost3dsg.msg import Centroid, CentroidArray, Bbox3d, Bbox3dArray
 from object_info import Object
@@ -160,6 +160,82 @@ file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(messa
 module_logger = logging.getLogger('perception_module')
 module_logger.setLevel(logging.DEBUG)
 module_logger.addHandler(file_handler)
+
+# ==============================================================================
+# CONFIGURABLE PARAMETERS
+# ==============================================================================
+# IoU threshold to consider an object as "re-detected" and skip VLM description.
+# If IoU between current detection and a persistent object exceeds this threshold,
+# the existing description is reused instead of calling VLM again.
+# Higher value = stricter match required, more VLM calls but more accurate descriptions
+# Lower value = more aggressive caching, fewer VLM calls but may reuse stale descriptions
+REDETECTION_IOU_THRESHOLD = 0.1  # Configurable: range [0.0 - 1.0]
+
+def find_matching_persistent_object(bbox_3d, label, threshold=REDETECTION_IOU_THRESHOLD):
+    """
+    Find a persistent object that matches the current detection based on label and 3D IoU.
+    Reads from persistent_perception.json file (written by object_manager.py).
+    
+    Args:
+        bbox_3d: dict with 3D bounding box coordinates (x/y/z min/max)
+        label: string label of the detected object (base label without instance number)
+        threshold: IoU threshold to consider objects as matching
+    
+    Returns:
+        matching_obj: dict with object data if found, else None
+        best_iou: float IoU value of the best match
+    """
+    # Path to persistent perceptions file (written by object_manager.py)
+    persistent_file = os.path.join(PROJECT_ROOT, "output", "persistent_perception.json")
+    
+    # Check if file exists
+    if not os.path.exists(persistent_file):
+        return None, 0.0
+    
+    # Load persistent objects from file
+    try:
+        with open(persistent_file, "r") as f:
+            persistent_objects = json.load(f)
+    except (json.JSONDecodeError, IOError) as e:
+        print(f"[VLM SKIP] Warning: Could not read persistent_perception.json: {e}")
+        return None, 0.0
+    
+    if not persistent_objects:
+        return None, 0.0
+    
+    best_match = None
+    best_iou = 0.0
+    
+    # Extract base label (remove instance numbers like "table#1" -> "table")
+    base_label = label.split('#')[0].lower().strip()
+    
+    for obj in persistent_objects:
+        # Check if labels match (compare base labels)
+        obj_label = obj.get('label', '')
+        obj_base_label = obj_label.split('#')[0].lower().strip() if obj_label else ""
+        
+        if obj_base_label != base_label:
+            continue
+        
+        # Check if object has a valid bbox
+        obj_bbox = obj.get('bbox')
+        if obj_bbox is None:
+            continue
+        
+        # Compute 3D IoU
+        try:
+            iou = compute_iou_3d(bbox_3d, obj_bbox)
+            if iou > best_iou:
+                best_iou = iou
+                best_match = obj
+        except Exception:
+            continue
+    
+    # Return match only if IoU exceeds threshold
+    if best_iou >= threshold:
+        return best_match, best_iou
+    
+    return None, best_iou
 
 @dataclass
 class Detection:
@@ -713,7 +789,8 @@ class DetectObjects(Node):
             crops_data.append({
                 'cropped': cropped,
                 'label': det.instance_label,
-                'idx': idx
+                'idx': idx,
+                'bbox_3d': bbox_3d  # Added for VLM skip optimization
             })
 
         # --- Publish all crops ---
@@ -735,22 +812,58 @@ class DetectObjects(Node):
         # --- Stage 5: VLM Description ---
         vlm_desc_start = time.time()
         self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting VLM Description stage (Parallel)...")
-        # --- 6. Call VLM for each cropped object in parallel ---
-        with ThreadPoolExecutor(max_workers=min(4, len(crops_data))) as executor:
-            # Submit all tasks
-            future_to_crop = {executor.submit(self.process_crop_vlm, crop_info): crop_info 
-                             for crop_info in crops_data}
+        
+        # --- OPTIMIZATION: Check persistent objects to skip VLM for re-detected objects ---
+        vlm_results = [None] * len(crops_data)
+        crops_needing_vlm = []  # Only objects that need VLM call
+        cached_count = 0
+        
+        for i, crop_info in enumerate(crops_data):
+            if crop_info is None:
+                continue
             
-            # Collect results as they complete
-            vlm_results = [None] * len(crops_data)
-            for future in as_completed(future_to_crop):
-                result = future.result()
-                if result:
-                    for i, crop_info in enumerate(crops_data):
-                        if crop_info and crop_info['label'] == result['label']:
-                            vlm_results[i] = result
-                            self.get_logger().info(f"Completed VLM call for {result['label']}")
-                            break
+            # Check if this object matches a persistent object with high IoU
+            bbox_3d = crop_info.get('bbox_3d')
+            if bbox_3d is not None:
+                matching_obj, iou = find_matching_persistent_object(
+                    bbox_3d, crop_info['label'], REDETECTION_IOU_THRESHOLD
+                )
+                
+                if matching_obj is not None:
+                    # Reuse existing description from persistent object (dict from JSON)
+                    vlm_results[i] = {
+                        "label": crop_info['label'],
+                        "json_answer": "{}",  # Not available from cache
+                        "description": matching_obj.get('description', 'unknown'),
+                        "color": matching_obj.get('color', 'unknown'),
+                        "material": matching_obj.get('material', 'unknown'),
+                        "shape": matching_obj.get('shape', 'unknown')
+                    }
+                    cached_count += 1
+                    self.get_logger().info(
+                        f"[SKIP VLM] Reusing description for {crop_info['label']} (IoU={iou:.2f} >= {REDETECTION_IOU_THRESHOLD})"
+                    )
+                    continue
+            
+            # No match found, need VLM call
+            crops_needing_vlm.append((i, crop_info))
+        
+        self.log_both("info", f"VLM skip: {cached_count} objects cached, {len(crops_needing_vlm)} need VLM call")
+        
+        # --- Call VLM only for objects that need it ---
+        if crops_needing_vlm:
+            with ThreadPoolExecutor(max_workers=min(4, len(crops_needing_vlm))) as executor:
+                # Submit tasks only for objects needing VLM
+                future_to_idx = {executor.submit(self.process_crop_vlm, crop_info): (idx, crop_info) 
+                                for idx, crop_info in crops_needing_vlm}
+                
+                # Collect results as they complete
+                for future in as_completed(future_to_idx):
+                    idx, crop_info = future_to_idx[future]
+                    result = future.result()
+                    if result:
+                        vlm_results[idx] = result
+                        self.get_logger().info(f"Completed VLM call for {result['label']}")
         timing_results['VLM Description'] = time.time() - vlm_desc_start
         self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed VLM Description stage.")
 
