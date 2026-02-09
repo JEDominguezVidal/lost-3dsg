@@ -9,9 +9,10 @@ class Object:
         color (str, optional): The color of the object. Defaults to "".
         material (str, optional): The material of the object. Defaults to "".
         shape (str, optional): The shape of the object. Defaults to "".
+        embedding (ndarray, optional): The embedding vector of the description. Defaults to None.
     """
 
-    def __init__(self, label, centroid, bbox=None, description="", color="",material="",shape=""):
+    def __init__(self, label, centroid, bbox=None, description="", color="",material="",shape="", embedding=None):
         self.label = label
         self.centroid = centroid
         self.bbox = bbox
@@ -19,3 +20,4 @@ class Object:
         self.color= color
         self.material=material
         self.shape=shape
+        self.embedding = embedding

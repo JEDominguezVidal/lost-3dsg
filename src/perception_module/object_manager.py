@@ -29,6 +29,12 @@ SIM_THRESHOLD = 0.75
 TRACKING_IOU_THRESHOLD = 0.3  # IoU threshold to consider objects as "moved" in tracking mode
 VOLUME_EXPANSION_RATIO = 0.01 # 1% expansion relative to object dimensions
 
+# =============  EMBEDDING OPTIMIZATION  =============
+# IoU threshold to skip embedding calculation and reuse existing embedding.
+# If an object matches a persistent object with IoU >= this threshold, 
+# we skip the API call and reuse the existing embedding.
+EMBEDDING_SKIP_IOU_THRESHOLD = 0.7  # Configurable: range [0.0 - 1.0]
+
 
 # Load OpenAI API key
 # Setup file logger and project paths
@@ -316,6 +322,58 @@ def bbox_centroid_in_volume(bbox, volume):
     )
 
     return is_inside
+
+
+def find_spatial_match_for_embedding(label, bbox, threshold=EMBEDDING_SKIP_IOU_THRESHOLD):
+    """
+    Pre-match function to find a persistent object based ONLY on spatial IoU and label.
+    Used BEFORE embedding calculation to potentially skip the API call.
+    
+    Args:
+        label: string label of the detected object
+        bbox: dict with 3D bounding box coordinates (x/y/z min/max)
+        threshold: IoU threshold to consider objects as matching
+    
+    Returns:
+        matching_obj: Object from wm.persistent_perceptions if found, else None
+        best_iou: float IoU value of the best match
+    """
+    if bbox is None:
+        return None, 0.0
+    
+    best_match = None
+    best_iou = 0.0
+    
+    # Extract base label (remove instance numbers like "table#1" -> "table")
+    base_label = label.split('#')[0].lower().strip()
+    
+    for obj in wm.persistent_perceptions:
+        # Check if labels match (compare base labels)
+        obj_base_label = obj.label.split('#')[0].lower().strip() if hasattr(obj, 'label') else ""
+        
+        if obj_base_label != base_label:
+            continue
+        
+        # Check if object has a valid bbox and embedding
+        if not hasattr(obj, 'bbox') or obj.bbox is None:
+            continue
+        if not hasattr(obj, 'embedding') or obj.embedding is None:
+            continue
+        
+        # Compute 3D IoU
+        try:
+            iou = compute_iou_3d(bbox, obj.bbox)
+            if iou > best_iou:
+                best_iou = iou
+                best_match = obj
+        except Exception:
+            continue
+    
+    # Return match only if IoU exceeds threshold
+    if best_iou >= threshold:
+        return best_match, best_iou
+    
+    return None, best_iou
 
 
 def save_persistent_perceptions(node):
@@ -677,25 +735,35 @@ class ObjectManagerNode(Node):
             material = description.material
             description_text = description.description
 
-            # --- Stage: Embeddings ---
-            embed_start = time.time()
-            self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting Embeddings stage for {label}...")
-            print(f"1. Calculating embedding for description...")
-            description_embedding = get_embedding(client, description_text)
-            timing_results['Embeddings'] = timing_results.get('Embeddings', 0) + (time.time() - embed_start)
-            self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed Embeddings stage for {label}.")
-
-
-            # Find the old key with only label
+            # First, get the bbox for this label (needed for spatial pre-match)
             old_key = create_object_key(label, "", "", "")
-
+            
             if old_key not in self.latest_bboxes:
                 print("No matching bbox found for this label.")
                 continue
-
+            
             # Found matching bbox
             bbox = self.latest_bboxes[old_key]["bbox"]
             matched_label = self.latest_bboxes[old_key]["label"]
+
+            # --- Stage: Embeddings (with spatial pre-match optimization) ---
+            embed_start = time.time()
+            self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting Embeddings stage for {label}...")
+            
+            # OPTIMIZATION: Check if we can reuse embedding from a spatially matched persistent object
+            spatial_match, match_iou = find_spatial_match_for_embedding(label, bbox, EMBEDDING_SKIP_IOU_THRESHOLD)
+            
+            if spatial_match is not None:
+                # Reuse existing embedding from matched persistent object
+                description_embedding = spatial_match.embedding
+                print(f"[EMBED SKIP] ✓ Reusing embedding from '{spatial_match.label}' (IoU={match_iou:.2f} >= {EMBEDDING_SKIP_IOU_THRESHOLD})")
+            else:
+                # No spatial match found, need to calculate new embedding
+                print(f"1. Calculating embedding for description...")
+                description_embedding = get_embedding(client, description_text)
+            
+            timing_results['Embeddings'] = timing_results.get('Embeddings', 0) + (time.time() - embed_start)
+            self.log_both('info', f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Completed Embeddings stage for {label}.")
 
             new_key = create_object_key(label, material, color, description_text)
 

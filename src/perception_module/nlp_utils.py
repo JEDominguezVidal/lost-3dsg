@@ -1,8 +1,52 @@
 import numpy as np
 import webcolors
+import hashlib
+import json
+import os
 
 
 EMBEDDING_MODEL = "text-embedding-3-small"
+
+# Embedding cache configuration
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "output", "embedding_cache")
+_CACHE_FILE = os.path.join(_CACHE_DIR, "embeddings.json")
+_embedding_cache = {}  # In-memory cache: {hash: embedding_list}
+_cache_loaded = False
+
+def _load_embedding_cache():
+    """Load embedding cache from disk if it exists."""
+    global _embedding_cache, _cache_loaded
+    if _cache_loaded:
+        return
+    
+    try:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        if os.path.exists(_CACHE_FILE):
+            with open(_CACHE_FILE, 'r') as f:
+                _embedding_cache = json.load(f)
+            print(f"[CACHE] Loaded {len(_embedding_cache)} embeddings from cache")
+        else:
+            _embedding_cache = {}
+            print("[CACHE] No existing cache file, starting fresh")
+    except Exception as e:
+        print(f"[CACHE] Error loading cache: {e}")
+        _embedding_cache = {}
+    
+    _cache_loaded = True
+
+def _save_embedding_cache():
+    """Save embedding cache to disk."""
+    global _embedding_cache
+    try:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        with open(_CACHE_FILE, 'w') as f:
+            json.dump(_embedding_cache, f)
+    except Exception as e:
+        print(f"[CACHE] Error saving cache: {e}")
+
+def _get_text_hash(text: str) -> str:
+    """Generate a hash for a text string."""
+    return hashlib.md5(text.encode('utf-8')).hexdigest()
 
 def semantic_similarity(word2vec_model, word1: str, word2: str) -> float:
     """Calculate semantic similarity between two words using Word2Vec."""
@@ -132,16 +176,41 @@ def color_similarity_rgb(color1: str, color2: str, word2vec_model=None) -> float
 
 def get_embedding(client, text):
     """
-    Restituisce embedding vettoriale tramite OpenAI.
-    Usato per matching semantico tra descrizioni oggetti.
+    Returns vectorial embedding via OpenAI with persistent caching.
+    Used for semantic matching between object descriptions.
+    
+    The cache is stored in output/embedding_cache/embeddings.json to avoid
+    redundant API calls for previously seen descriptions.
     """
+    if not text or text.strip() == "":
+        return None
+    
+    # Load cache from disk on first call
+    _load_embedding_cache()
+    
+    # Check cache first
+    text_hash = _get_text_hash(text)
+    if text_hash in _embedding_cache:
+        cached_embedding = _embedding_cache[text_hash]
+        print(f"[CACHE] ✓ Embedding found in cache (hash: {text_hash[:8]}...)")
+        return np.array(cached_embedding)
+    
+    # Not in cache, call OpenAI API
     try:
+        print(f"[CACHE] Embedding not cached, calling OpenAI API...")
         resp = client.embeddings.create(model=EMBEDDING_MODEL, input=text)
-        return np.array(resp.data[0].embedding)
+        embedding = np.array(resp.data[0].embedding)
+        
+        # Save to cache (store as list for JSON serialization)
+        _embedding_cache[text_hash] = embedding.tolist()
+        _save_embedding_cache()
+        print(f"[CACHE] Saved new embedding to cache (hash: {text_hash[:8]}...)")
+        
+        return embedding
     except Exception as e:
         print(f"Error during embedding creation: {e}")
-        print("\n\n\n")  # Spaces for debugging
         return None
+
 
 def cosine_similarity(a, b):
     return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
