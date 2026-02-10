@@ -30,6 +30,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 import time
 import logging
+import threading
 
 # Project imports
 from cv_utils import *
@@ -333,6 +334,9 @@ class PerceptionNode(Node):
 
         # Clear accumulated markers
         self.clear_accumulated_markers()
+
+        # Lock to ensure single-threaded execution of the perception pipeline
+        self.processing_lock = threading.Lock()
 
     def log_both(self, level, message):
         # Log on ROS
@@ -1086,65 +1090,74 @@ def main(args=None):
     #input_handler = threading.Thread(target=input_thread, daemon=True)
     #input_handler.start()
 
+    # Use lock to prevent concurrent execution of perception pipeline
     def timer_callback():
-        current_time = node.get_clock().now()
-
-        # Case MANUAL TRIGGER - has priority over everything
-        if node.manual_trigger_requested:
-            if node.camera_data.get_synced_data() is not None:
-                node.log_both('info', "=== MANUAL PERCEPTION TRIGGERED ===")
-                node.publish_objects()
-                # Capture time AFTER publish_objects completes
-                completion_time = node.get_clock().now()
-                node.first_detection_done = True
-                node.last_detection_time = completion_time
-                node.time_stationary_start = completion_time  # Reset timer after detection
-                node.manual_trigger_requested = False  # Reset flag
-            else:
-                node.get_logger().warn("Trigger received but camera data not available - retrying next cycle")
+        # Try to acquire lock - if failed, it means previous cycle is still running
+        if not node.processing_lock.acquire(blocking=False):
             return
 
-        # Case 1: FIRST DETECTION
-        if not node.first_detection_done:
-            if node.camera_data.get_synced_data() is not None:
-                msg = "First detection: synchronized data available – starting perception."
-                node.log_both('info', msg)
-                node.publish_objects()
-                # Capture time AFTER publish_objects completes
-                completion_time = node.get_clock().now()
-                node.first_detection_done = True
-                node.last_detection_time = completion_time
-                node.time_stationary_start = completion_time  # Reset timer after first detection
+        try:
+            current_time = node.get_clock().now()
+
+            # Case MANUAL TRIGGER - has priority over everything
+            if node.manual_trigger_requested:
+                if node.camera_data.get_synced_data() is not None:
+                    node.log_both('info', "=== MANUAL PERCEPTION TRIGGERED ===")
+                    node.publish_objects()
+                    # Capture time AFTER publish_objects completes
+                    completion_time = node.get_clock().now()
+                    node.first_detection_done = True
+                    node.last_detection_time = completion_time
+                    node.time_stationary_start = completion_time  # Reset timer after detection
+                    node.manual_trigger_requested = False  # Reset flag
+                else:
+                    node.get_logger().warn("Trigger received but camera data not available - retrying next cycle")
+                return
+
+            # Case 1: FIRST DETECTION
+            if not node.first_detection_done:
+                if node.camera_data.get_synced_data() is not None:
+                    msg = "First detection: synchronized data available – starting perception."
+                    node.log_both('info', msg)
+                    node.publish_objects()
+                    # Capture time AFTER publish_objects completes
+                    completion_time = node.get_clock().now()
+                    node.first_detection_done = True
+                    node.last_detection_time = completion_time
+                    node.time_stationary_start = completion_time  # Reset timer after first detection
+                else:
+                    node.file_logger.debug("Waiting for synchronized data for first detection...")
+                return
+
+            # Case 2: RE-DETECTION AFTER TIME INTERVAL (Set the time interval as you prefer) now for five seconds
+            print("________________ Timer callback: checking for re-detection conditions... __________________")
+            print("Stationary:", node.is_stationary)
+            print("Time stationary for : ", (current_time - node.time_stationary_start).nanoseconds / 1e9 if node.time_stationary_start else "N/A")
+            print("Threshold: ", node.min_stationary_after_movement)
+
+            if node.is_stationary and node.time_stationary_start is not None:
+                time_stationary = (current_time - node.time_stationary_start).nanoseconds / 1e9
+                print(f"DEBUG: time_stationary={time_stationary:.2f}s >= threshold={node.min_stationary_after_movement}s? {time_stationary >= node.min_stationary_after_movement}")
+
+                if time_stationary >= node.min_stationary_after_movement:
+                    # Robot is stationary for enough time, data are enough stable
+                    node.log_both('info', "Robot stationary for sufficient time – starting new perception cycle.")
+                    print("DEBUG: About to call publish_objects()")
+                    node.publish_objects()
+                    print("DEBUG: publish_objects() completed, resetting timer")
+                    # Capture time AFTER publish_objects completes
+                    completion_time = node.get_clock().now()
+                    node.last_detection_time = completion_time
+                    node.time_stationary_start = completion_time  # Reset timer after detection
+                    print(f"DEBUG: Timer reset to completion_time (not current_time from start of callback)")
+                else:
+                    print(f"DEBUG: Not enough time yet, waiting {node.min_stationary_after_movement - time_stationary:.2f}s more")
+                return
             else:
-                node.file_logger.debug("Waiting for synchronized data for first detection...")
-            return
-
-        # Case 2: RE-DETECTION AFTER TIME INTERVAL (Set the time interval as you prefer) now for five seconds
-        print("________________ Timer callback: checking for re-detection conditions... __________________")
-        print("Stationary:", node.is_stationary)
-        print("Time stationary for : ", (current_time - node.time_stationary_start).nanoseconds / 1e9 if node.time_stationary_start else "N/A")
-        print("Threshold: ", node.min_stationary_after_movement)
-
-        if node.is_stationary and node.time_stationary_start is not None:
-            time_stationary = (current_time - node.time_stationary_start).nanoseconds / 1e9
-            print(f"DEBUG: time_stationary={time_stationary:.2f}s >= threshold={node.min_stationary_after_movement}s? {time_stationary >= node.min_stationary_after_movement}")
-
-            if time_stationary >= node.min_stationary_after_movement:
-                # Robot is stationary for enough time, data are enough stable
-                node.log_both('info', "Robot stationary for sufficient time – starting new perception cycle.")
-                print("DEBUG: About to call publish_objects()")
-                node.publish_objects()
-                print("DEBUG: publish_objects() completed, resetting timer")
-                # Capture time AFTER publish_objects completes
-                completion_time = node.get_clock().now()
-                node.last_detection_time = completion_time
-                node.time_stationary_start = completion_time  # Reset timer after detection
-                print(f"DEBUG: Timer reset to completion_time (not current_time from start of callback)")
-            else:
-                print(f"DEBUG: Not enough time yet, waiting {node.min_stationary_after_movement - time_stationary:.2f}s more")
-            return
-        else:
-            print(f"DEBUG: Skipping re-detection - is_stationary={node.is_stationary}, time_stationary_start={'None' if node.time_stationary_start is None else 'set'}")
+                print(f"DEBUG: Skipping re-detection - is_stationary={node.is_stationary}, time_stationary_start={'None' if node.time_stationary_start is None else 'set'}")
+        
+        finally:
+            node.processing_lock.release()
 
     # Use the same callback group for the timer to allow reentrant execution
     _timer = node.create_timer(0.5, timer_callback, callback_group=node.cb_group)  
