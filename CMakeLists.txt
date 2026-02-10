@@ -25,6 +25,9 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/Bbox3dArray.msg"
   "msg/ObjectDescription.msg"
   "msg/ObjectDescriptionArray.msg"
+  "msg/ObjectDetection2D.msg"
+  "srv/DetectObjects.srv"
+  "srv/GetImageDescription.srv"
   DEPENDENCIES std_msgs sensor_msgs geometry_msgs
 )
 
@@ -39,6 +42,7 @@ install(PROGRAMS
   src/perception_module/models.py
   src/perception_module/nlp_utils.py
   src/perception_module/debug_utils.py
+  src/perception_module/florence2_node.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -56,6 +60,11 @@ install(DIRECTORY src/perception_module/efficientvit
   DESTINATION lib/${PROJECT_NAME}
   FILES_MATCHING PATTERN "*.py"
   PATTERN "__pycache__" EXCLUDE
+)
+
+# Install assets (checkpoints, etc.)
+install(DIRECTORY assets/
+  DESTINATION assets
 )
 
 # Install data files (text prompts and API key)

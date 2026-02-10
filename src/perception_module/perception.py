@@ -11,6 +11,8 @@ import rclpy
 from rclpy.node import Node
 from rclpy.duration import Duration
 from rclpy.qos import QoSProfile, DurabilityPolicy
+from rclpy.callback_groups import ReentrantCallbackGroup
+from rclpy.executors import MultiThreadedExecutor
 from sensor_msgs.msg import Image, JointState
 from std_msgs.msg import String, Header
 from datetime import datetime
@@ -34,11 +36,11 @@ from cv_utils import *
 import utils
 from utils import draw_detections, apply_nms, compute_iou_3d
 from models import DINO, VitSam, OWLv2
-from florence2_detector import get_florence_detector
 from lost3dsg.msg import Centroid, CentroidArray, Bbox3d, Bbox3dArray
 from object_info import Object
 from world_model import wm
-from lost3dsg.msg import ObjectDescription, ObjectDescriptionArray
+from lost3dsg.msg import ObjectDescription, ObjectDescriptionArray, ObjectDetection2D
+from lost3dsg.srv import DetectObjects, GetImageDescription
 from std_msgs.msg import Bool
 import torch
 if torch.cuda.is_available():
@@ -246,7 +248,7 @@ class Detection:
     mask: np.ndarray
 
 
-class DetectObjects(Node):
+class PerceptionNode(Node):
     def __init__(self):
         super().__init__('detection_node')
         
@@ -266,9 +268,20 @@ class DetectObjects(Node):
         self.detector = DINO()  # Keep for backwards compatibility (may be removed later)
         self.vitsam = VitSam(utils.ENCODER_VITSAM_PATH, utils.DECODER_VITSAM_PATH)
         
-        # Florence-2 detector for object detection and captioning
-        self.florence = get_florence_detector(device="cuda")
-
+        # Callback group for multi-threaded execution (allows blocking service calls)
+        self.cb_group = ReentrantCallbackGroup()
+        
+        # --- Initialize Service Clients for Florence-2 ---
+        self.detect_client = self.create_client(DetectObjects, '/florence2/detect', callback_group=self.cb_group)
+        self.describe_client = self.create_client(GetImageDescription, '/florence2/describe', callback_group=self.cb_group)
+        
+        self.get_logger().info("Waiting for Florence-2 services...")
+        if not self.detect_client.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error("Florence-2 detect service not available!")
+        if not self.describe_client.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error("Florence-2 describe service not available!")
+        self.get_logger().info("Florence-2 services connected.")
+        
         self.centroid_pub = self.create_publisher(CentroidArray, "/centroids_custom", qos_latch)
 
         self.tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=30.0))
@@ -438,13 +451,22 @@ class DetectObjects(Node):
         self.log_both("info", "=== START DETECTION ===")
         self.log_both("info", f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] Starting Florence-2 Detection stage...")
         
-        # Florence-2 detects objects and provides bounding boxes
-        florence_detections = self.florence.detect_objects(camera_data['rgb'])
+        # Prepare Request
+        req = DetectObjects.Request()
+        req.image = self.bridge.cv2_to_imgmsg(camera_data['rgb'], encoding="rgb8")
         
+        # Call Service (Synchronous call in MultiThreadedExecutor)
+        try:
+            florence_response = self.detect_client.call(req)
+            florence_detections = florence_response.detections
+        except Exception as e:
+            self.get_logger().error(f"Service call failed: {e}")
+            florence_detections = []
+            
         # Extract labels, bboxes, scores from Florence-2 output
-        labels = [det['label'] for det in florence_detections]
-        bboxs = [det['bbox'] for det in florence_detections]  # [x1, y1, x2, y2]
-        scores = [det['score'] for det in florence_detections]
+        labels = [det.label for det in florence_detections]
+        bboxs = [det.bbox for det in florence_detections]  # [x1, y1, x2, y2]
+        scores = [det.score for det in florence_detections]
         
         self.log_both("info", f"Florence-2 detected {len(labels)} objects with labels: {labels}")
         
@@ -513,7 +535,8 @@ class DetectObjects(Node):
         
         try:
             # Use Florence-2 for description (replaces GPT vlm_call)
-            description = self.florence.describe_image(cropped)
+            description = self.get_florence_description(cropped)
+            self.log_both("info", f"   > Florence-2 Description: {description}")
             
             return {
                 "label": label,
@@ -530,12 +553,33 @@ class DetectObjects(Node):
                 "json_answer": "{}",
                 "description": "unknown",
                 "color": "unknown",
-                "material": "unknown",
-                "shape": "unknown"
             }
 
 
+    def get_florence_description(self, image_np, task_prompt="<MORE_DETAILED_CAPTION>"):
+        """
+        Helper to get description from Florence-2 service.
+        """
+        try:
+            req = GetImageDescription.Request()
+            req.image = self.bridge.cv2_to_imgmsg(image_np, encoding="rgb8")
+            req.prompt = task_prompt
+            
+            # Call Service (Synchronous call in MultiThreadedExecutor)
+            try:
+                result = self.describe_client.call(req)
+                return result.description
+            except Exception as e:
+                self.get_logger().error(f"Description service call failed: {e}")
+                return ""
+        except Exception as e:
+            self.get_logger().error(f"Error calling description service: {e}")
+            return ""
+
     def publish_objects(self):
+        """
+        Main loop for object detection and publishing.
+        """
         self.processing_interrupted = False
         iteration_start_time = time.time()
         timing_results = {}
@@ -1017,7 +1061,7 @@ class DetectObjects(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = DetectObjects()
+    node = PerceptionNode()
 
     # Thread to handle terminal input (for test it can be useful to trigger manually the perception)
     def input_thread():
@@ -1102,10 +1146,14 @@ def main(args=None):
         else:
             print(f"DEBUG: Skipping re-detection - is_stationary={node.is_stationary}, time_stationary_start={'None' if node.time_stationary_start is None else 'set'}")
 
-    _timer = node.create_timer(0.5, timer_callback)  
+    # Use the same callback group for the timer to allow reentrant execution
+    _timer = node.create_timer(0.5, timer_callback, callback_group=node.cb_group)  
+
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
 
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

@@ -1,0 +1,4 @@
+sensor_msgs/Image image
+string prompt  # e.g., "<MORE_DETAILED_CAPTION>", "<CAPTION>"
+---
+string description
